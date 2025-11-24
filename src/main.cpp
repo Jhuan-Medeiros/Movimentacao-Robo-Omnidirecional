@@ -42,8 +42,8 @@ float deadzone(float value, float zone = 0.20f)
 velRodas conversao(float lx, float ly, float rx)
 {
   // Normalização do joystick para velocidades físicas
-  float vx = (lx / 128.0f) * vMax;
-  float vy = (-ly / 128.0f) * vMax;
+  float vx = (ly / 128.0f) * vMax;
+  float vy = (lx / 128.0f) * vMax;
   float w = (rx / 128.0f) * rMax;
 
   velRodas vel;
