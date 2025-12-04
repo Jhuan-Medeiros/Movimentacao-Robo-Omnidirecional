@@ -1,9 +1,10 @@
+#include <ESP32Encoder.h>
 #include <Ps3Controller.h>
 #include <Arduino.h>
 #include <cmath>
 
-// define as diferentes rodas
 
+// define as diferentes rodas
 struct velRodas
 {
   float w1;
@@ -12,7 +13,6 @@ struct velRodas
 };
 
 // PINOS DOS MOTORES
-
 #define M1_IN1 12
 #define M1_IN2 14
 #define M1_PWM 13
@@ -32,56 +32,32 @@ struct velRodas
 #define M3_C2 17
 
 // variaveis fisicas
-
 const float centro = 0.133f;
 const float raio = 0.033f;
 
-// velocidades maximas
-
-const float vMax = 0.30f; // linear
+// ⚠️ CORREÇÃO 1: Ajusta vMax para atingir o RPM máximo do motor (~280 RPM)
+const float W_MAX_MOTOR_RAD_S = 29.32f; // ~280 RPM
+const float vMax = W_MAX_MOTOR_RAD_S * raio; // Novo vMax = 0.967 m/s
 const float rMax = 1.0f;  // rotação
 
 // velocidade motor
+// ⚠️ CORREÇÃO 2: Novo valor calculado (643.0f) para que 280 RPM sejam lidos como 280
+const float CPR_MOTOR = 643.0f; 
 
-const float CPR_MOTOR = 468.0f; // "counts per revolution" obtido pela formula relacaoDaCaixaDeReducao x pulsosPorVoltaDoDisco
+// --- Configuração da Biblioteca ESP32Encoder ---
 
-// leitura de cada encoder
+ESP32Encoder encoder1Obj;
+ESP32Encoder encoder2Obj;
+ESP32Encoder encoder3Obj;
 
-struct Encoder
-{
-  volatile long position;   // gravam o movimento do encoder
-  long lastPosition;        // gravam o momento do ultimo movimento do encoder
-  unsigned long lastMillis; // variavel auxilixar para cada millis
-};
+ESP32Encoder* encodersArray[] = {&encoder1Obj, &encoder2Obj, &encoder3Obj};
 
-// separa a leitura de cada encoder
-Encoder encoders[3];
+long lastPosition[3] = {0, 0, 0};
+unsigned long lastMillis[3] = {0, 0, 0};
 
-// le os encoders
+// ----------------------------------------------
 
-void IRAM_ATTR encoder1()
-{
-  if (digitalRead(M1_C1) == digitalRead(M1_C2))
-    encoders[0].position++;
-  else
-    encoders[0].position--;
-}
-void IRAM_ATTR encoder2()
-{
-  if (digitalRead(M2_C1) == digitalRead(M2_C2))
-    encoders[1].position++;
-  else
-    encoders[1].position--;
-}
-void IRAM_ATTR encoder3()
-{
-  if (digitalRead(M3_C1) == digitalRead(M3_C2))
-    encoders[2].position++;
-  else
-    encoders[2].position--;
-}
-
-float deadzone(float value, float zone = 0.20f)
+float deadzone(float value, float zone = 0.05f) // Reduzido para 5%
 {
   if (fabs(value) < zone)
     return 0.0f;
@@ -100,9 +76,9 @@ velRodas conversao(float lx, float ly, float rx)
   const float L = centro;
   const float r = raio;
 
-  vx = deadzone(vx, 0.05f); // 5% de deadzone
-  vy = deadzone(vy, 0.05f);
-  w = deadzone(w, 0.05f);
+  vx = deadzone(vx);
+  vy = deadzone(vy);
+  w = deadzone(w);
 
   // constantes da cinematica
   float sqrt3_sobre_2 = sqrt(3.0f) / 2.0f;
@@ -116,18 +92,23 @@ velRodas conversao(float lx, float ly, float rx)
   return vel;
 }
 
-void setMotor(int IN1, int IN2, int pwmPin, float velocidade)
+void setMotor(int IN1, int IN2, int pwmPin, float velocidade_rad_s)
 {
-  int pwmValue = int(fabs(velocidade) * 255); // converte de 0-1 para 0-255
-  if (pwmValue > 255)
-    pwmValue = 255; // limite de PWM
+  // ⚠️ CORREÇÃO 3: Escala o rad/s para o PWM. 
+  // Agora W_MAX_MOTOR_RAD_S (29.32 rad/s) corresponde a 100% (255) do PWM.
+  float porcentagem = fabs(velocidade_rad_s) / W_MAX_MOTOR_RAD_S;
 
-  if (velocidade > 0)
+  if (porcentagem > 1.0f)
+    porcentagem = 1.0f; // Limita a 100%
+
+  int pwmValue = int(porcentagem * 255); 
+
+  if (velocidade_rad_s > 0)
   {
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
   }
-  else if (velocidade < 0)
+  else if (velocidade_rad_s < 0)
   {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
@@ -136,6 +117,7 @@ void setMotor(int IN1, int IN2, int pwmPin, float velocidade)
   {
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, LOW);
+    pwmValue = 0;
   }
 
   analogWrite(pwmPin, pwmValue);
@@ -144,56 +126,59 @@ void setMotor(int IN1, int IN2, int pwmPin, float velocidade)
 float getRPM(int whichEncoder)
 {
   unsigned long now = millis();
-  unsigned long deltaTime = now - encoders[whichEncoder].lastMillis;
+  unsigned long deltaTime = now - lastMillis[whichEncoder];
 
-  noInterrupts();
-  long pos = encoders[whichEncoder].position;
-  interrupts();
+  // Leitura da posição diretamente do objeto da biblioteca
+  long pos = encodersArray[whichEncoder]->getCount(); 
 
-  long delta = pos - encoders[whichEncoder].lastPosition;
+  long delta = pos - lastPosition[whichEncoder];
 
   if (deltaTime == 0)
     return 0;
 
+  // A fórmula usa CPR_MOTOR=643.0f
   float rpm = ((float)delta / CPR_MOTOR) * (60000.0f / (float)deltaTime);
 
-  encoders[whichEncoder].lastPosition = pos;
-  encoders[whichEncoder].lastMillis = now;
+  lastPosition[whichEncoder] = pos;
+  lastMillis[whichEncoder] = now;
   return rpm;
 }
 
+
+// --- SETUP CORRIGIDO ---
 void setup()
 {
   Ps3.begin("01:02:03:04:05:06");
   Serial.begin(115200);
+  
+  // Conecta os pinos dos encoders (PCNT)
+  encoder1Obj.attachFullQuad(M1_C1, M1_C2);
+  encoder2Obj.attachFullQuad(M2_C1, M2_C2);
+  encoder3Obj.attachFullQuad(M3_C1, M3_C2);
 
+  // Zera os contadores
+  encoder1Obj.setCount(0);
+  encoder2Obj.setCount(0);
+  encoder3Obj.setCount(0);
+  
+  // Configuração dos Pinos de Controle (Mantido)
   pinMode(M1_IN1, OUTPUT);
   pinMode(M1_IN2, OUTPUT);
   pinMode(M1_PWM, OUTPUT);
-  pinMode(M1_C1, INPUT_PULLUP);
-  pinMode(M1_C2, INPUT_PULLUP);
-
+  
   pinMode(M2_IN1, OUTPUT);
   pinMode(M2_IN2, OUTPUT);
   pinMode(M2_PWM, OUTPUT);
-  pinMode(M2_C1, INPUT_PULLUP);
-  pinMode(M2_C2, INPUT_PULLUP);
-
+  
   pinMode(M3_IN1, OUTPUT);
   pinMode(M3_IN2, OUTPUT);
   pinMode(M3_PWM, OUTPUT);
-  pinMode(M3_C1, INPUT_PULLUP);
-  pinMode(M3_C2, INPUT_PULLUP);
 
-  attachInterrupt(digitalPinToInterrupt(M1_C1), encoder1, RISING);
-  attachInterrupt(digitalPinToInterrupt(M2_C1), encoder2, RISING);
-  attachInterrupt(digitalPinToInterrupt(M3_C1), encoder3, RISING);
-
+  // Inicializa as variáveis de tempo e posição para o cálculo do RPM
   for (int i = 0; i < 3; i++)
   {
-    encoders[i].position = 0;
-    encoders[i].lastPosition = 0;
-    encoders[i].lastMillis = millis();
+    lastPosition[i] = 0;
+    lastMillis[i] = millis();
   }
 }
 
@@ -216,7 +201,6 @@ void loop()
   setMotor(M3_IN1, M3_IN2, M3_PWM, v.w3);
 
   // exibe o rpm
-
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 200)
   {
