@@ -2,8 +2,18 @@
 #include <Arduino.h>
 #include <cmath>
 
-// define as diferentes rodas
+// -------------------------------
+// CONFIGURAÇÃO PWM (LEDC)
+// -------------------------------
+#define PWM_FREQ 5000
+#define PWM_RES  8
+#define M1_CH    0
+#define M2_CH    1
+#define M3_CH    2
 
+// -------------------------------
+// ESTRUTURAS
+// -------------------------------
 struct velRodas
 {
   float w1;
@@ -11,76 +21,63 @@ struct velRodas
   float w3;
 };
 
+// -------------------------------
 // PINOS DOS MOTORES
-
+// -------------------------------
 #define M1_IN1 12
 #define M1_IN2 14
 #define M1_PWM 13
-#define M1_C1 4
-#define M1_C2 5
+#define M1_C1 35
+#define M1_C2 34
 
 #define M2_IN1 27
 #define M2_IN2 26
 #define M2_PWM 25
-#define M2_C1 16
-#define M2_C2 2
 
 #define M3_IN1 19
 #define M3_IN2 18
 #define M3_PWM 21
-#define M3_C1 15
-#define M3_C2 17
 
-// variaveis fisicas
-
+// -------------------------------
+// VARIÁVEIS FÍSICAS
+// -------------------------------
 const float centro = 0.133f;
 const float raio = 0.033f;
-
-// velocidades maximas
 
 const float vMax = 0.30f; // linear
 const float rMax = 1.0f;  // rotação
 
-// velocidade motor
+const float CPR = 468.0f;
 
-const float CPR_MOTOR = 468.0f; // "counts per revolution" obtido pela formula relacaoDaCaixaDeReducao x pulsosPorVoltaDoDisco
+// -------------------------------
+// VARIÁVEIS DE LEITURA DO ENCODER
+// -------------------------------
+volatile long posMotor1 = 0;
+volatile uint8_t lastStateM1 = 0;
 
-// leitura de cada encoder
+unsigned long ultimaVez = 0;
+long ultimaPos1 = 0;
 
-struct Encoder
-{
-  volatile long position;   // gravam o movimento do encoder
-  long lastPosition;        // gravam o momento do ultimo movimento do encoder
-  unsigned long lastMillis; // variavel auxilixar para cada millis
-};
+// -------------------------------
+// FUNÇÕES DE ENCODER
+// -------------------------------
+void IRAM_ATTR atualizaPosicaoMotor() {
+  uint8_t state = (digitalRead(M1_C1) << 1) | digitalRead(M1_C2);
 
-// separa a leitura de cada encoder
-Encoder encoders[3];
+  int8_t lookup[16] = {
+    0, -1, 1, 0,
+    1, 0, 0, -1,
+    -1, 0, 0, 1,
+    0, 1, -1, 0
+  };
 
-// le os encoders
-
-void IRAM_ATTR encoder1()
-{
-  if (digitalRead(M1_C1) == digitalRead(M1_C2))
-    encoders[0].position++;
-  else
-    encoders[0].position--;
-}
-void IRAM_ATTR encoder2()
-{
-  if (digitalRead(M2_C1) == digitalRead(M2_C2))
-    encoders[1].position++;
-  else
-    encoders[1].position--;
-}
-void IRAM_ATTR encoder3()
-{
-  if (digitalRead(M3_C1) == digitalRead(M3_C2))
-    encoders[2].position++;
-  else
-    encoders[2].position--;
+  posMotor1 += lookup[(lastStateM1 << 2) | state];
+  lastStateM1 = state;
 }
 
+// -------------------------------
+// DEADZONE JOYSTICK
+// -------------------------------
 float deadzone(float value, float zone = 0.20f)
 {
   if (fabs(value) < zone)
@@ -88,27 +85,27 @@ float deadzone(float value, float zone = 0.20f)
   return value;
 }
 
+// -------------------------------
+// CINEMÁTICA
+// -------------------------------
 velRodas conversao(float lx, float ly, float rx)
 {
-  // normalização do joystick para velocidades físicas
+  // Normaliza entradas do PS3 (-128 a 127) para unidades físicas
   float vx = (ly / 128.0f) * vMax;
   float vy = (lx / 128.0f) * vMax;
   float w = (rx / 128.0f) * rMax;
 
-  velRodas vel;
+  vx = deadzone(vx, 0.05f);
+  vy = deadzone(vy, 0.05f);
+  w  = deadzone(w, 0.05f);
 
+  velRodas vel;
   const float L = centro;
   const float r = raio;
 
-  vx = deadzone(vx, 0.05f); // 5% de deadzone
-  vy = deadzone(vy, 0.05f);
-  w = deadzone(w, 0.05f);
-
-  // constantes da cinematica
   float sqrt3_sobre_2 = sqrt(3.0f) / 2.0f;
   float meio = 0.5f;
 
-  // formulas da inversão da matriz cinematica
   vel.w1 = (-sqrt3_sobre_2 / r) * vx + (meio / r) * vy + (L / r) * w;
   vel.w2 = (0.0f) * vx + (-1.0f / r) * vy + (L / r) * w;
   vel.w3 = (sqrt3_sobre_2 / r) * vx + (meio / r) * vy + (L / r) * w;
@@ -116,11 +113,17 @@ velRodas conversao(float lx, float ly, float rx)
   return vel;
 }
 
-void setMotor(int IN1, int IN2, int pwmPin, float velocidade)
+// -------------------------------
+// FUNÇÃO DE CONTROLE DE MOTORES (MODIFICADA)
+// -------------------------------
+// Agora recebe o CANAL PWM (pwmChannel) em vez do pino
+void setMotor(int IN1, int IN2, int pwmChannel, float velocidade)
 {
-  int pwmValue = int(fabs(velocidade) * 255); // converte de 0-1 para 0-255
-  if (pwmValue > 255)
-    pwmValue = 255; // limite de PWM
+  // Converte velocidade física para Duty Cycle (0-255)
+  // Nota: Ajuste o fator multiplicador se sua velocidade sair muito baixa ou alta
+  int pwmValue = int(fabs(velocidade) * 255); 
+  
+  if (pwmValue > 255) pwmValue = 255;
 
   if (velocidade > 0)
   {
@@ -138,95 +141,84 @@ void setMotor(int IN1, int IN2, int pwmPin, float velocidade)
     digitalWrite(IN2, LOW);
   }
 
-  analogWrite(pwmPin, pwmValue);
+  // Substitui analogWrite por ledcWrite
+  ledcWrite(pwmChannel, pwmValue);
 }
 
-float getRPM(int whichEncoder)
-{
-  unsigned long now = millis();
-  unsigned long deltaTime = now - encoders[whichEncoder].lastMillis;
-
-  noInterrupts();
-  long pos = encoders[whichEncoder].position;
-  interrupts();
-
-  long delta = pos - encoders[whichEncoder].lastPosition;
-
-  if (deltaTime == 0)
-    return 0;
-
-  float rpm = ((float)delta / CPR_MOTOR) * (60000.0f / (float)deltaTime);
-
-  encoders[whichEncoder].lastPosition = pos;
-  encoders[whichEncoder].lastMillis = now;
-  return rpm;
-}
-
+// -------------------------------
+// SETUP
+// -------------------------------
 void setup()
 {
-  Ps3.begin("01:02:03:04:05:06");
   Serial.begin(115200);
+  Ps3.begin("01:02:03:04:05:06");
 
+  // --- Configuração Motor 1 ---
   pinMode(M1_IN1, OUTPUT);
   pinMode(M1_IN2, OUTPUT);
-  pinMode(M1_PWM, OUTPUT);
+  // Configura PWM Canal 0
+  ledcSetup(M1_CH, PWM_FREQ, PWM_RES);
+  ledcAttachPin(M1_PWM, M1_CH);
+  
+  // Encoder Motor 1
   pinMode(M1_C1, INPUT_PULLUP);
   pinMode(M1_C2, INPUT_PULLUP);
+  lastStateM1 = (digitalRead(M1_C1) << 1) | digitalRead(M1_C2);
+  attachInterrupt(digitalPinToInterrupt(M1_C1), atualizaPosicaoMotor, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(M1_C2), atualizaPosicaoMotor, CHANGE);
 
+  // --- Configuração Motor 2 ---
   pinMode(M2_IN1, OUTPUT);
   pinMode(M2_IN2, OUTPUT);
-  pinMode(M2_PWM, OUTPUT);
-  pinMode(M2_C1, INPUT_PULLUP);
-  pinMode(M2_C2, INPUT_PULLUP);
+  // Configura PWM Canal 1
+  ledcSetup(M2_CH, PWM_FREQ, PWM_RES);
+  ledcAttachPin(M2_PWM, M2_CH);
 
+  // --- Configuração Motor 3 ---
   pinMode(M3_IN1, OUTPUT);
   pinMode(M3_IN2, OUTPUT);
-  pinMode(M3_PWM, OUTPUT);
-  pinMode(M3_C1, INPUT_PULLUP);
-  pinMode(M3_C2, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(M1_C1), encoder1, RISING);
-  attachInterrupt(digitalPinToInterrupt(M2_C1), encoder2, RISING);
-  attachInterrupt(digitalPinToInterrupt(M3_C1), encoder3, RISING);
-
-  for (int i = 0; i < 3; i++)
-  {
-    encoders[i].position = 0;
-    encoders[i].lastPosition = 0;
-    encoders[i].lastMillis = millis();
-  }
+  // Configura PWM Canal 2
+  ledcSetup(M3_CH, PWM_FREQ, PWM_RES);
+  ledcAttachPin(M3_PWM, M3_CH);
 }
 
+// -------------------------------
+// LOOP
+// -------------------------------
 void loop()
 {
-  if (!Ps3.isConnected())
-    return;
+  if (!Ps3.isConnected()) return;
 
-  // le os valores dos joysticks
+  // Lendo analógicos (range -128 a 127)
   float lx = Ps3.data.analog.stick.lx;
   float ly = Ps3.data.analog.stick.ly;
   float rx = Ps3.data.analog.stick.rx;
 
-  // converte para velocidades das rodas
+  // Calcula cinemática
   velRodas v = conversao(lx, ly, rx);
 
-  // envia para os motores
-  setMotor(M1_IN1, M1_IN2, M1_PWM, v.w1);
-  setMotor(M2_IN1, M2_IN2, M2_PWM, v.w2);
-  setMotor(M3_IN1, M3_IN2, M3_PWM, v.w3);
+  // Envia para os motores usando os Canais PWM definidos
+  setMotor(M1_IN1, M1_IN2, M1_CH, v.w1);
+  setMotor(M2_IN1, M2_IN2, M2_CH, v.w2);
+  setMotor(M3_IN1, M3_IN2, M3_CH, v.w3);
 
-  // exibe o rpm
+  // --- Cálculo de RPM Motor 1 ---
+  unsigned long agora = millis();
+  unsigned long dt = agora - ultimaVez;
 
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 200)
-  {
+  if(dt >= 1000) {
+    noInterrupts();
+    long pos = posMotor1;
+    interrupts();
+
+    long delta = pos - ultimaPos1;
+    float voltas = (float)delta / CPR;
+    float rpm = voltas * (60000.0f / (float)dt);
+
     Serial.print("RPM1: ");
-    Serial.print(getRPM(0), 1);
-    Serial.print(" | RPM2: ");
-    Serial.print(getRPM(1), 1);
-    Serial.print(" | RPM3: ");
-    Serial.println(getRPM(2), 1);
+    Serial.println(rpm, 1);
 
-    lastPrint = millis();
+    ultimaPos1 = pos;
+    ultimaVez = agora;
   }
 }
